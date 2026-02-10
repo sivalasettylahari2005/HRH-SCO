@@ -1,4 +1,5 @@
 from mmdet.apis import init_detector
+import torch
 from inference_YOLC import inference_detector, inference_detector_with_LSM
 import numpy as np
 import cv2
@@ -42,9 +43,6 @@ def inference(model1, model2, img, img_name, num_cls = 10, saved_crop = 2, crop=
 
         for i in range(len(subregion_coord)):
             x, y, w, h = subregion_coord[i]
-            # filter small crops
-            if w*h < 96*96:
-                continue
             x = int(x)
             y = int(y)
 
@@ -58,36 +56,35 @@ def inference(model1, model2, img, img_name, num_cls = 10, saved_crop = 2, crop=
 
             w_half *= box_scale_ratio
             h_half *= box_scale_ratio
-            w, h = img_np.shape[1], img_np.shape[0]
+            w_img, h_img = img_np.shape[1], img_np.shape[0]
 
-            # scale dense region by 1.2x to avoid truncation
             boxes_scaled = [0, 0, 0, 0]
-            boxes_scaled[0] = min(max(x_center - w_half, 0), w - 1)
-            boxes_scaled[2] = min(max(x_center + w_half, 0), w - 1)
-            boxes_scaled[1] = min(max(y_center - h_half, 0), h - 1)
-            boxes_scaled[3] = min(max(y_center + h_half, 0), h - 1)
+            boxes_scaled[0] = min(max(x_center - w_half, 0), w_img - 1)
+            boxes_scaled[2] = min(max(x_center + w_half, 0), w_img - 1)
+            boxes_scaled[1] = min(max(y_center - h_half, 0), h_img - 1)
+            boxes_scaled[3] = min(max(y_center + h_half, 0), h_img - 1)
+            
             cluster_regions.append(boxes_scaled)
             boxes_scaled = [int(i) for i in boxes_scaled]
-
 
             img_scale_ratio = 1.5   # image scale factor
             w_new = boxes_scaled[2] - boxes_scaled[0]
             h_new = boxes_scaled[3] - boxes_scaled[1]
-            # crop and resize sub-image by 1.5x
+            
+            if w_new <= 0 or h_new <= 0:
+                continue
+
             img_crop = img_np[boxes_scaled[1]:boxes_scaled[3], boxes_scaled[0]:boxes_scaled[2]]
-            if visual:
-                cv2.rectangle(img_draw, (boxes_scaled[0], boxes_scaled[1]), (boxes_scaled[2], boxes_scaled[3]), (0, 0, 0), 2)
             img_resize = cv2.resize(img_crop, (int(w_new * img_scale_ratio), int(h_new * img_scale_ratio)))
-        
             result_refine = inference_detector(model2, img_resize)
         
-            for i in range(len(coarse_result)):
-                final_result[i].append([0,0,0,0,0]) # avoid empty list
-                for item in result_refine[i]:
-                    item[0:4] = item[0:4] / img_scale_ratio
-                    item[0:2] += boxes_scaled[0:2]
-                    item[2:4] += boxes_scaled[0:2]
-                    final_result[i].append(item)
+            for j in range(len(result_refine)):
+                for item in result_refine[j]:
+                    new_item = item.copy()
+                    new_item[0:4] = new_item[0:4] / img_scale_ratio
+                    new_item[0:2] += boxes_scaled[0:2]
+                    new_item[2:4] += boxes_scaled[0:2]
+                    final_result[j].append(new_item)
 
     # fuse coarse and refined results
     for i in range(len(coarse_result)):
@@ -97,20 +94,19 @@ def inference(model1, model2, img, img_name, num_cls = 10, saved_crop = 2, crop=
             x_center = (x1 + x2) / 2
             y_center = (y1 + y2) / 2
             in_cluster = False
-            # YOLC replaces the coarse results with refined results in cluster regions 
             for boxes_scaled in cluster_regions:
-                if boxes_scaled[0] <= x1 and x2 <= boxes_scaled[2] and boxes_scaled[1] <= y1 and y2 <= boxes_scaled[3]:
+                if boxes_scaled[0] <= x_center <= boxes_scaled[2] and boxes_scaled[1] <= y_center <= boxes_scaled[3]:
                     in_cluster = True
                     break
             if not in_cluster:
                 final_result[i].append(item)
-    
-    if visual:
-        path = "tmp/"+img.split("/")[-1]
-        cv2.imwrite(path, img_draw)
 
+    # Convert to numpy arrays
     for i in range(len(final_result)):
-        final_result[i] = np.array(final_result[i])
+        if len(final_result[i]) > 0:
+            final_result[i] = np.stack(final_result[i])
+        else:
+            final_result[i] = np.zeros((0, 5), dtype=np.float32)
 
     return final_result
 
@@ -118,52 +114,68 @@ def inference(model1, model2, img, img_name, num_cls = 10, saved_crop = 2, crop=
 
 
 if __name__ == '__main__':
-    dataset_anno = 'data/Visdrone2019/VisDrone2019-DET_val_coco.json'
-    dataset_root = 'data/Visdrone2019/VisDrone2019-DET-val/images'
+    dataset_anno = 'data/Visdrone2019/val_coco.json'
+    dataset_root = 'data/Visdrone2019/unzipped_val/VisDrone2019-DET-val/images'
 
     classes = ('pedestrian', "people", "bicycle", "car", "van", "truck", "tricycle", "awning-tricycle", "bus", "motor")
 
     config_file1 = './configs/yolc.py'
     config_file2 = './configs/yolc.py'
 
-    checkpoint_file = './work_dirs/yolc/epoch_xx.pth'
+    checkpoint_file = 'yolc.pth'
 
-    # Global Image Detector
-    model1 = init_detector(config_file1, checkpoint_file, device='cuda:0')
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
+    model1 = init_detector(config_file1, checkpoint_file, device=device)
     model1.eval()
 
-    # Crop Image Detector (weight sharing)
     model2 = model1
-    # model2 = init_detector(config_file2, checkpoint_file, device='cuda:1')
-    # model2.eval()
+    saved_crop = 2
 
-    saved_crop = 2      # crop region numbers generated by LSM (e.g. k=2)
-
-    with open(dataset_anno) as f:
-        json_info = json.load(f)
-    annotation_set = {}
-    for annotation in json_info['annotations']:
-        image_id = annotation['image_id']
-        if not image_id in annotation_set.keys():
-            annotation_set[image_id] = []
-        annotation_set[image_id].append(annotation)
-
-    coco = COCO(dataset_anno)   # Load Val Dataset
-    size = len(list(coco.imgs.keys()))  #  Image num
+    # Standard loop to eval all images
+    coco = COCO(dataset_anno)
+    size = len(list(coco.imgs.keys()))
     results = []
+    
+    checkpoint_path = 'results_checkpoint.pkl'
+    import pickle
+    
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, 'rb') as f:
+            results = pickle.load(f)
+        print(f"Resuming from checkpoint: {len(results)} images already processed.")
+    
     prog_bar = mmcv.ProgressBar(size)
-    for key in range(size):
-        ids = list(coco.imgs.keys())
-        key = ids[key]
+    for _ in range(len(results)):
+        prog_bar.update()
 
-        width = coco.imgs[key]['width']
-        height = coco.imgs[key]['height']
-        img_name = coco.imgs[key]['file_name']
+    import time
+    start_time = time.time()
+    ids = coco.getImgIds()
+    
+    for i in range(len(results), size):
+        img_id = ids[i]
+        img_info = coco.loadImgs([img_id])[0]
+        img_name = img_info['file_name']
         img = os.path.join(dataset_root, img_name)
+        
         final_result = inference(model1, model2, img, img_name, num_cls=len(classes), saved_crop = 2)
         results.append(final_result)
-
+        
+        # Save checkpoint every 10 images
+        if (i + 1) % 10 == 0:
+            with open(checkpoint_path, 'wb') as f:
+                pickle.dump(results, f)
+        
         prog_bar.update()
+        time.sleep(2) # Give CPU room to breathe
+    
+    end_time = time.time()
+    total_time = end_time - start_time
+    avg_time = total_time / size
+    print(f"\nTotal inference time: {total_time:.2f} s")
+    print(f"Average time per image: {avg_time:.2f} s")
+    print(f"Efficiency (FPS): {1/avg_time:.2f}")
     
 
     eval_kwargs = dict(interval=1, metric='bbox')

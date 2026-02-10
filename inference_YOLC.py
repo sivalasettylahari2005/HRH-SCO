@@ -63,9 +63,10 @@ def inference_detector(model, imgs):
         data = scatter(data, [device])[0]
     else:
         for m in model.modules():
-            assert not isinstance(
-                m, RoIPool
-            ), 'CPU inference with RoIPool is not supported currently.'
+            # assert not isinstance(
+            #     m, RoIPool
+            # ), 'CPU inference with RoIPool is not supported currently.'
+            pass
 
     # forward the model
     with torch.no_grad():

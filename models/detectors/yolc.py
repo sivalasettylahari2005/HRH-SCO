@@ -110,8 +110,8 @@ class YOLC(SingleStageDetector):
             flip_direction = img_metas[flip_ind][0]['flip_direction']
             img_pair = torch.cat([imgs[ind], imgs[flip_ind]])
             x = self.extract_feat(img_pair)
-            center_heatmap_preds, xywh_preds_coarse, xywh_preds_refine = self.bbox_head(x)
-            assert len(center_heatmap_preds) == len(xywh_preds_coarse) == len(xywh_preds_refine)  == 1
+            center_heatmap_preds, center_offset_preds, xywh_preds_coarse, xywh_preds_refine = self.bbox_head(x)
+            assert len(center_heatmap_preds) == len(center_offset_preds) == len(xywh_preds_coarse) == len(xywh_preds_refine)  == 1
 
             # Feature map averaging
             center_heatmap_preds[0] = (
@@ -121,6 +121,7 @@ class YOLC(SingleStageDetector):
 
             bbox_list = self.bbox_head.get_bboxes(
                 center_heatmap_preds,
+                center_offset_preds,
                 xywh_preds_coarse,
                 xywh_preds_refine,
                 img_metas[ind],
